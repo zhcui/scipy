@@ -438,19 +438,42 @@ def mode(a, axis=0, nan_policy='propagate'):
         a = ma.masked_invalid(a)
         return mstats_basic.mode(a, axis)
 
-    scores = np.unique(np.ravel(a))       # get ALL unique values
-    testshape = list(a.shape)
-    testshape[axis] = 1
-    oldmostfreq = np.zeros(testshape, dtype=a.dtype)
-    oldcounts = np.zeros(testshape, dtype=int)
-    for score in scores:
-        template = (a == score)
-        counts = np.expand_dims(np.sum(template, axis), axis)
-        mostfrequent = np.where(counts > oldcounts, score, oldmostfreq)
-        oldcounts = np.maximum(counts, oldcounts)
-        oldmostfreq = mostfrequent
+    if (NumpyVersion(np.__version__) < '1.9.0') or (a.dtype == object and np.nan in set(a)):
+        # Fall back to a slower method since np.unique does not work with NaN
+        # or for older numpy which does not support return_counts
+        scores = set(np.ravel(a))  # get ALL unique values
+        testshape = list(a.shape)
+        testshape[axis] = 1
+        oldmostfreq = np.zeros(testshape, dtype=a.dtype)
+        oldcounts = np.zeros(testshape, dtype=int)
 
-    return ModeResult(mostfrequent, oldcounts)
+        for score in scores:
+            template = (a == score)
+            counts = np.expand_dims(np.sum(template, axis), axis)
+            mostfrequent = np.where(counts > oldcounts, score, oldmostfreq)
+            oldcounts = np.maximum(counts, oldcounts)
+            oldmostfreq = mostfrequent
+
+        return ModeResult(mostfrequent, oldcounts)
+
+    def _mode1D(a):
+        vals, cnts = np.unique(a, return_counts=True)
+        return vals[cnts.argmax()], cnts.max()
+
+    # np.apply_along_axis will convert the _mode1D tuples to a numpy array, casting types in the process
+    # This recreates the results without that issue
+    # View of a, rotated so the requested axis is last
+    in_dims = list(range(a.ndim))
+    a_view = np.transpose(a, in_dims[:axis] + in_dims[axis+1:] + [axis])
+
+    inds = np.ndindex(a_view.shape[:-1])
+    modes = np.empty(a_view.shape[:-1], dtype=a.dtype)
+    counts = np.zeros(a_view.shape[:-1], dtype=np.int)
+    for ind in inds:
+        modes[ind], counts[ind] = _mode1D(a_view[ind])
+    newshape = list(a.shape)
+    newshape[axis] = 1
+    return ModeResult(modes.reshape(newshape), counts.reshape(newshape))
 
 
 def _mask_to_limits(a, limits, inclusive):
@@ -872,7 +895,7 @@ def moment(a, moment=1, axis=0, nan_policy='propagate'):
 
     References
     ----------
-    .. [1] http://eli.thegreenplace.net/2009/03/21/efficient-integer-exponentiation-algorithms
+    .. [1] https://eli.thegreenplace.net/2009/03/21/efficient-integer-exponentiation-algorithms
 
     Examples
     --------
@@ -1665,25 +1688,26 @@ def scoreatpercentile(a, per, limit=(), interpolation_method='fraction',
     if limit:
         a = a[(limit[0] <= a) & (a <= limit[1])]
 
-    sorted = np.sort(a, axis=axis)
+    sorted_ = np.sort(a, axis=axis)
     if axis is None:
         axis = 0
 
-    return _compute_qth_percentile(sorted, per, interpolation_method, axis)
+    return _compute_qth_percentile(sorted_, per, interpolation_method, axis)
 
 
 # handle sequence of per's without calling sort multiple times
-def _compute_qth_percentile(sorted, per, interpolation_method, axis):
+def _compute_qth_percentile(sorted_, per, interpolation_method, axis):
     if not np.isscalar(per):
-        score = [_compute_qth_percentile(sorted, i, interpolation_method, axis)
+        score = [_compute_qth_percentile(sorted_, i,
+                                         interpolation_method, axis)
                  for i in per]
         return np.array(score)
 
     if (per < 0) or (per > 100):
         raise ValueError("percentile must be in the range [0, 100]")
 
-    indexer = [slice(None)] * sorted.ndim
-    idx = per / 100. * (sorted.shape[axis] - 1)
+    indexer = [slice(None)] * sorted_.ndim
+    idx = per / 100. * (sorted_.shape[axis] - 1)
 
     if int(idx) != idx:
         # round fractional indices according to interpolation method
@@ -1706,13 +1730,13 @@ def _compute_qth_percentile(sorted, per, interpolation_method, axis):
         indexer[axis] = slice(i, i + 2)
         j = i + 1
         weights = array([(j - idx), (idx - i)], float)
-        wshape = [1] * sorted.ndim
+        wshape = [1] * sorted_.ndim
         wshape[axis] = 2
         weights.shape = wshape
         sumval = weights.sum()
 
     # Use np.add.reduce (== np.sum but a little faster) to coerce data type
-    return np.add.reduce(sorted[indexer] * weights, axis=axis) / sumval
+    return np.add.reduce(sorted_[tuple(indexer)] * weights, axis=axis) / sumval
 
 
 def percentileofscore(a, score, kind='rank'):
@@ -1745,7 +1769,7 @@ def percentileofscore(a, score, kind='rank'):
         - "mean": The average of the "weak" and "strict" scores, often used in
                   testing.  See
 
-                  http://en.wikipedia.org/wiki/Percentile_rank
+                  https://en.wikipedia.org/wiki/Percentile_rank
 
     Returns
     -------
@@ -2707,7 +2731,7 @@ def trimboth(a, proportiontocut, axis=0):
 
     sl = [slice(None)] * atmp.ndim
     sl[axis] = slice(lowercut, uppercut)
-    return atmp[sl]
+    return atmp[tuple(sl)]
 
 
 def trim1(a, proportiontocut, tail='right', axis=0):
@@ -2830,7 +2854,7 @@ def trim_mean(a, proportiontocut, axis=0):
 
     sl = [slice(None)] * atmp.ndim
     sl[axis] = slice(lowercut, uppercut)
-    return np.mean(atmp[sl], axis=axis)
+    return np.mean(atmp[tuple(sl)], axis=axis)
 
 
 F_onewayResult = namedtuple('F_onewayResult', ('statistic', 'pvalue'))
@@ -2877,7 +2901,7 @@ def f_oneway(*args):
     ----------
     .. [1] Lowry, Richard.  "Concepts and Applications of Inferential
            Statistics". Chapter 14.
-           http://faculty.vassar.edu/lowry/ch14pt1.html
+           https://web.archive.org/web/20171027235250/http://vassarstats.net:80/textbook/ch14pt1.html
 
     .. [2] Heiman, G.W.  Research Methods in Statistics. 2002.
 
@@ -3403,7 +3427,9 @@ def pointbiserialr(x, y):
            Variable. Point-Biserial Correlation.", Ann. Math. Statist., Vol. 25,
            np. 3, pp. 603-607, 1954.
 
-    .. [3] http://onlinelibrary.wiley.com/doi/10.1002/9781118445112.stat06227/full
+    .. [3] D. Kornbrot "Point Biserial Correlation", In Wiley StatsRef:
+           Statistics Reference Online (eds N. Balakrishnan, et al.), 2014.
+           https://doi.org/10.1002/9781118445112.stat06227
 
     Examples
     --------
@@ -3426,7 +3452,7 @@ def pointbiserialr(x, y):
 KendalltauResult = namedtuple('KendalltauResult', ('correlation', 'pvalue'))
 
 
-def kendalltau(x, y, initial_lexsort=None, nan_policy='propagate'):
+def kendalltau(x, y, initial_lexsort=None, nan_policy='propagate', method='auto'):
     """
     Calculate Kendall's tau, a correlation measure for ordinal data.
 
@@ -3449,6 +3475,12 @@ def kendalltau(x, y, initial_lexsort=None, nan_policy='propagate'):
         values. Default is 'propagate'. Note that if the input contains nan
         'omit' delegates to mstats_basic.kendalltau(), which has a different
         implementation.
+    method: {'auto', 'asymptotic', 'exact'}, optional
+        Defines which method is used to calculate the p-value [5]_. 
+        'asymptotic' uses a normal approximation valid for large samples. 
+        'exact' computes the exact p-value, but can only be used if no ties 
+        are present. 'auto' is the default and selects the appropriate 
+        method based on a trade-off between speed and accuracy.
 
     Returns
     -------
@@ -3486,6 +3518,8 @@ def kendalltau(x, y, initial_lexsort=None, nan_policy='propagate'):
     .. [4] Peter M. Fenwick, "A new data structure for cumulative frequency
            tables", Software: Practice and Experience, Vol. 24, No. 3,
            pp. 327-336, 1994.
+    .. [5] Maurice G. Kendall, "Rank Correlation Methods" (4th Edition), 
+           Charles Griffin & Co., 1970.
 
     Examples
     --------
@@ -3521,7 +3555,7 @@ def kendalltau(x, y, initial_lexsort=None, nan_policy='propagate'):
     elif contains_nan and nan_policy == 'omit':
         x = ma.masked_invalid(x)
         y = ma.masked_invalid(y)
-        return mstats_basic.kendalltau(x, y)
+        return mstats_basic.kendalltau(x, y, method=method)
 
     if initial_lexsort is not None:  # deprecate to drop!
         warnings.warn('"initial_lexsort" is gone!')
@@ -3564,14 +3598,53 @@ def kendalltau(x, y, initial_lexsort=None, nan_policy='propagate'):
     # Limit range to fix computational errors
     tau = min(1., max(-1., tau))
 
-    # con_minus_dis is approx normally distributed with this variance [3]_
-    var = (size * (size - 1) * (2.*size + 5) - x1 - y1) / 18. + (
-        2. * xtie * ytie) / (size * (size - 1)) + x0 * y0 / (9. *
-        size * (size - 1) * (size - 2))
-    pvalue = special.erfc(np.abs(con_minus_dis) / np.sqrt(var) / np.sqrt(2))
+    if method == 'exact' and (xtie != 0 or ytie != 0):
+        raise ValueError("Ties found, exact method cannot be used.")
+        
+    if method == 'auto':
+        if (xtie == 0 and ytie == 0) and (size <= 33 or min(dis, tot-dis) <= 1):
+            method = 'exact'
+        else:
+            method = 'asymptotic'
+        
+    if xtie == 0 and ytie == 0 and method == 'exact':
+        # Exact p-value, see Maurice G. Kendall, "Rank Correlation Methods" (4th Edition), Charles Griffin & Co., 1970.
+        c = min(dis, tot-dis)
+        if size <= 0:
+            raise ValueError
+        elif c < 0 or 2*c > size*(size-1):
+            raise ValueError
+        elif size == 1:
+            pvalue = 1.0
+        elif size == 2:
+            pvalue = 1.0
+        elif c == 0:
+            pvalue = 2.0/np.math.factorial(size)
+        elif c == 1:
+            pvalue = 2.0/np.math.factorial(size-1)
+        else:
+            old = [0.0]*(c+1)
+            new = [0.0]*(c+1)
+            new[0] = 1.0
+            new[1] = 1.0
+            for j in range(3,size+1):
+                old = new[:]
+                for k in range(1,min(j,c+1)):
+                    new[k] += new[k-1]
+                for k in range(j,c+1):
+                    new[k] += new[k-1] - old[k-j]
+            pvalue = 2.0*sum(new)/np.math.factorial(size)
 
-    # Limit range to fix computational errors
-    return KendalltauResult(min(1., max(-1., tau)), pvalue)
+    elif method == 'asymptotic':
+        # con_minus_dis is approx normally distributed with this variance [3]_
+        var = (size * (size - 1) * (2.*size + 5) - x1 - y1) / 18. + (
+            2. * xtie * ytie) / (size * (size - 1)) + x0 * y0 / (9. *
+            size * (size - 1) * (size - 2))
+        pvalue = special.erfc(np.abs(con_minus_dis) / np.sqrt(var) / np.sqrt(2))
+    else:
+        raise ValueError("Unknown method "+str(method)+" specified, please use auto, exact or asymptotic.")
+
+    return KendalltauResult(tau, pvalue)
 
 
 WeightedTauResult = namedtuple('WeightedTauResult', ('correlation', 'pvalue'))
@@ -3927,9 +4000,9 @@ def ttest_ind_from_stats(mean1, std1, nobs1, mean2, std2, nobs2,
 
     References
     ----------
-    .. [1] http://en.wikipedia.org/wiki/T-test#Independent_two-sample_t-test
+    .. [1] https://en.wikipedia.org/wiki/T-test#Independent_two-sample_t-test
 
-    .. [2] http://en.wikipedia.org/wiki/Welch%27s_t_test
+    .. [2] https://en.wikipedia.org/wiki/Welch%27s_t-test
 
     Examples
     --------
@@ -4018,9 +4091,9 @@ def ttest_ind(a, b, axis=0, equal_var=True, nan_policy='propagate'):
 
     References
     ----------
-    .. [1] http://en.wikipedia.org/wiki/T-test#Independent_two-sample_t-test
+    .. [1] https://en.wikipedia.org/wiki/T-test#Independent_two-sample_t-test
 
-    .. [2] http://en.wikipedia.org/wiki/Welch%27s_t_test
+    .. [2] https://en.wikipedia.org/wiki/Welch%27s_t-test
 
     Examples
     --------
@@ -4464,9 +4537,10 @@ def power_divergence(f_obs, f_exp=None, ddof=0, axis=0, lambda_=None):
     References
     ----------
     .. [1] Lowry, Richard.  "Concepts and Applications of Inferential
-           Statistics". Chapter 8. http://faculty.vassar.edu/lowry/ch8pt1.html
-    .. [2] "Chi-squared test", http://en.wikipedia.org/wiki/Chi-squared_test
-    .. [3] "G-test", http://en.wikipedia.org/wiki/G-test
+           Statistics". Chapter 8.
+           https://web.archive.org/web/20171015035606/http://faculty.vassar.edu/lowry/ch8pt1.html
+    .. [2] "Chi-squared test", https://en.wikipedia.org/wiki/Chi-squared_test
+    .. [3] "G-test", https://en.wikipedia.org/wiki/G-test
     .. [4] Sokal, R. R. and Rohlf, F. J. "Biometry: the principles and
            practice of statistics in biological research", New York: Freeman
            (1981)
@@ -4643,8 +4717,9 @@ def chisquare(f_obs, f_exp=None, ddof=0, axis=0):
     References
     ----------
     .. [1] Lowry, Richard.  "Concepts and Applications of Inferential
-           Statistics". Chapter 8. http://faculty.vassar.edu/lowry/ch8pt1.html
-    .. [2] "Chi-squared test", http://en.wikipedia.org/wiki/Chi-squared_test
+           Statistics". Chapter 8.
+           https://web.archive.org/web/20171022032306/http://vassarstats.net:80/textbook/ch8pt1.html
+    .. [2] "Chi-squared test", https://en.wikipedia.org/wiki/Chi-squared_test
 
     Examples
     --------
@@ -4959,7 +5034,7 @@ def ranksums(x, y):
 
     References
     ----------
-    .. [1] http://en.wikipedia.org/wiki/Wilcoxon_rank-sum_test
+    .. [1] https://en.wikipedia.org/wiki/Wilcoxon_rank-sum_test
 
     """
     x, y = map(np.asarray, (x, y))
@@ -5025,7 +5100,7 @@ def kruskal(*args, **kwargs):
     .. [1] W. H. Kruskal & W. W. Wallis, "Use of Ranks in
        One-Criterion Variance Analysis", Journal of the American Statistical
        Association, Vol. 47, Issue 260, pp. 583-621, 1952.
-    .. [2] http://en.wikipedia.org/wiki/Kruskal-Wallis_one-way_analysis_of_variance
+    .. [2] https://en.wikipedia.org/wiki/Kruskal-Wallis_one-way_analysis_of_variance
 
     Examples
     --------
@@ -5133,7 +5208,7 @@ def friedmanchisquare(*args):
 
     References
     ----------
-    .. [1] http://en.wikipedia.org/wiki/Friedman_test
+    .. [1] https://en.wikipedia.org/wiki/Friedman_test
 
     """
     k = len(args)
@@ -5348,7 +5423,7 @@ def combine_pvalues(pvalues, method='fisher', weights=None):
     References
     ----------
     .. [1] https://en.wikipedia.org/wiki/Fisher%27s_method
-    .. [2] http://en.wikipedia.org/wiki/Fisher's_method#Relation_to_Stouffer.27s_Z-score_method
+    .. [2] https://en.wikipedia.org/wiki/Fisher%27s_method#Relation_to_Stouffer.27s_Z-score_method
     .. [3] Whitlock, M. C. "Combining probability from independent tests: the
            weighted Z-method is superior to Fisher's approach." Journal of
            Evolutionary Biology 18, no. 5 (2005): 1368-1373.
@@ -5458,7 +5533,7 @@ def wasserstein_distance(u_values, v_values, u_weights=None, v_weights=None):
 
     References
     ----------
-    .. [1] "Wasserstein metric", http://en.wikipedia.org/wiki/Wasserstein_metric
+    .. [1] "Wasserstein metric", https://en.wikipedia.org/wiki/Wasserstein_metric
     .. [2] Ramdas, Garcia, Cuturi "On Wasserstein Two Sample Testing and Related
            Families of Nonparametric Tests" (2015). :arXiv:`1509.02237`.
 
@@ -5826,7 +5901,7 @@ def rankdata(a, method='average'):
 
     References
     ----------
-    .. [1] "Ranking", http://en.wikipedia.org/wiki/Ranking
+    .. [1] "Ranking", https://en.wikipedia.org/wiki/Ranking
 
     Examples
     --------
