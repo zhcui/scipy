@@ -93,9 +93,9 @@ void gemm(const I m, const I n, const I k, const double * A, const double * B, d
         //        m, n, k, alpha, A, k, B, n, beta, C, n) ;
 	libxsmm_gemm(NULL/*transa*/, NULL/*transb*/, 
 	n/*required*/, m/*required*/, k/*required*/,
-	&alpha/*alpha*/, B/*required*/, n/*ldb*/,
-	A/*required*/, k/*lda*/,
-	&beta/*beta*/, C/*required*/, n/*ldc*/); 
+	&alpha/*alpha*/, B/*required*/, NULL/*ldb*/,
+	A/*required*/, NULL/*lda*/,
+	&beta/*beta*/, C/*required*/, NULL/*ldc*/); 
 }
 
 
