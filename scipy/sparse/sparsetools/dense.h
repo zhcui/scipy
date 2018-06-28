@@ -1,5 +1,8 @@
 #ifndef __DENSE_H__
 #define __DENSE_H__
+//#include "mkl.h"
+#include <libxsmm.h>
+#include <stdio.h>
 
 // Simplified BLAS routines and other dense linear algebra functions
 
@@ -77,6 +80,22 @@ void gemm(const I m, const I n, const I k, const T * A, const T * B, T * C){
             C[(npy_intp)n * i + j] = dot;
         }
     }
+}
+
+// use libxsmm to accelarate the double type matrix multiplication.
+// note the libxsmm_gemm is in col major convention. 
+// TODO add a special function for complex case.
+template <class I>
+void gemm(const I m, const I n, const I k, const double * A, const double * B, double * C){
+	double alpha = 1.0 ;
+	double beta = 1.0 ;
+	//cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, 
+        //        m, n, k, alpha, A, k, B, n, beta, C, n) ;
+	libxsmm_gemm(NULL/*transa*/, NULL/*transb*/, 
+	n/*required*/, m/*required*/, k/*required*/,
+	&alpha/*alpha*/, B/*required*/, n/*ldb*/,
+	A/*required*/, k/*lda*/,
+	&beta/*beta*/, C/*required*/, n/*ldc*/); 
 }
 
 

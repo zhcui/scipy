@@ -31,6 +31,7 @@ tags
 *.py[ocd]
 *.so
 _configtest.c
+log.dat
 
 # Packages #
 ############
